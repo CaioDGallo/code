@@ -3,7 +3,10 @@ import {
   usePendingPermissionsForTask,
   useQueuedMessagesForTask,
 } from "@features/sessions/stores/sessionStore";
-import { useSessionViewActions } from "@features/sessions/stores/sessionViewStore";
+import {
+  type ScrollAnchor,
+  useSessionViewActions,
+} from "@features/sessions/stores/sessionViewStore";
 import { ArrowDown, XCircle } from "@phosphor-icons/react";
 import { Box, Button, Flex, Text } from "@radix-ui/themes";
 import type { AcpMessage } from "@shared/types/session-events";
@@ -34,7 +37,8 @@ interface ConversationViewProps {
 }
 
 const SHOW_BUTTON_THRESHOLD = 300;
-const ESTIMATE_SIZE = 36;
+const ESTIMATE_SIZE = 150;
+const SCROLL_SAVE_DEBOUNCE_MS = 150;
 
 export function ConversationView({
   events,
@@ -53,14 +57,16 @@ export function ConversationView({
   const pendingPermissionsCount = pendingPermissions.size;
 
   const queuedMessages = useQueuedMessagesForTask(taskId);
-  const { saveScrollPosition, getScrollPosition } = useSessionViewActions();
+  const { saveScrollAnchor, getScrollAnchor } = useSessionViewActions();
 
   const [showScrollButton, setShowScrollButton] = useState(false);
   const showScrollButtonRef = useRef(false);
   const hasRestoredScrollRef = useRef(false);
+  const prevTaskIdRef = useRef(taskId);
   const prevItemCountRef = useRef(0);
   const prevPendingCountRef = useRef(0);
   const prevEventsLengthRef = useRef(events.length);
+  const scrollSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const queuedItems = useMemo<Extract<ConversationItem, { type: "queued" }>[]>(
     () =>
@@ -80,15 +86,52 @@ export function ConversationView({
     [conversationItems, queuedItems],
   );
 
+  const applyScrollAnchor = useCallback((anchor: ScrollAnchor) => {
+    listRef.current?.scrollToIndex(anchor.index, { align: "start" });
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToIndex(anchor.index, { align: "start" });
+      if (anchor.offsetFromTop > 0) {
+        const el = document.querySelector(`[data-index="${anchor.index}"]`);
+        if (el) {
+          const container = el.closest("[data-scroll-container]");
+          if (container) {
+            container.scrollTop += anchor.offsetFromTop;
+          }
+        }
+      }
+    });
+  }, []);
+
+  // Reset hasRestoredScrollRef when taskId changes
+  useEffect(() => {
+    if (taskId !== prevTaskIdRef.current) {
+      // Flush pending scroll save for the previous task
+      if (scrollSaveTimerRef.current) {
+        clearTimeout(scrollSaveTimerRef.current);
+        scrollSaveTimerRef.current = null;
+        const prevId = prevTaskIdRef.current;
+        if (prevId) {
+          const anchor = listRef.current?.getScrollAnchor();
+          if (anchor) {
+            saveScrollAnchor(prevId, anchor);
+          }
+        }
+      }
+      hasRestoredScrollRef.current = false;
+      prevTaskIdRef.current = taskId;
+    }
+  }, [taskId, saveScrollAnchor]);
+
+  // Restore scroll position using index-based anchor
   useEffect(() => {
     if (!taskId || hasRestoredScrollRef.current) return;
 
-    const savedPosition = getScrollPosition(taskId);
-    if (savedPosition > 0) {
-      listRef.current?.scrollToOffset(savedPosition);
+    const savedAnchor = getScrollAnchor(taskId);
+    if (savedAnchor) {
+      applyScrollAnchor(savedAnchor);
       hasRestoredScrollRef.current = true;
     }
-  }, [taskId, getScrollPosition]);
+  }, [taskId, getScrollAnchor, applyScrollAnchor]);
 
   useEffect(() => {
     const isNewContent = virtualizedItems.length > prevItemCountRef.current;
@@ -98,15 +141,29 @@ export function ConversationView({
     prevPendingCountRef.current = pendingPermissionsCount;
     prevEventsLengthRef.current = events.length;
 
-    if (isNewContent || isNewPending) {
-      listRef.current?.scrollToBottom();
-      return;
-    }
-
-    if (isNewEvents && !showScrollButtonRef.current) {
-      listRef.current?.scrollToBottom();
+    // Only auto-scroll when user is at the bottom
+    if (!showScrollButtonRef.current) {
+      if (isNewContent || isNewPending || isNewEvents) {
+        listRef.current?.scrollToBottom();
+      }
     }
   }, [events.length, virtualizedItems.length, pendingPermissionsCount]);
+
+  // Flush pending scroll save on unmount
+  useEffect(() => {
+    return () => {
+      if (scrollSaveTimerRef.current) {
+        clearTimeout(scrollSaveTimerRef.current);
+        const currentTaskId = prevTaskIdRef.current;
+        if (currentTaskId) {
+          const anchor = listRef.current?.getScrollAnchor();
+          if (anchor) {
+            saveScrollAnchor(currentTaskId, anchor);
+          }
+        }
+      }
+    };
+  }, [saveScrollAnchor]);
 
   const handleScroll = useCallback(
     (scrollOffset: number, scrollHeight: number, clientHeight: number) => {
@@ -118,11 +175,31 @@ export function ConversationView({
       showScrollButtonRef.current = isScrolledUp;
 
       if (taskId) {
-        saveScrollPosition(taskId, scrollOffset);
+        if (scrollSaveTimerRef.current) {
+          clearTimeout(scrollSaveTimerRef.current);
+        }
+        scrollSaveTimerRef.current = setTimeout(() => {
+          const anchor = listRef.current?.getScrollAnchor();
+          if (anchor) {
+            saveScrollAnchor(taskId, anchor);
+          }
+        }, SCROLL_SAVE_DEBOUNCE_MS);
       }
     },
-    [taskId, saveScrollPosition],
+    [taskId, saveScrollAnchor],
   );
+
+  const restoreScrollAnchor = useCallback(() => {
+    if (!taskId) return;
+    const savedAnchor = getScrollAnchor(taskId);
+    if (savedAnchor) {
+      applyScrollAnchor(savedAnchor);
+    }
+  }, [taskId, getScrollAnchor, applyScrollAnchor]);
+
+  const handleBecameVisible = useCallback(() => {
+    restoreScrollAnchor();
+  }, [restoreScrollAnchor]);
 
   const scrollToBottom = useCallback(() => {
     listRef.current?.scrollToBottom();
@@ -185,10 +262,11 @@ export function ConversationView({
         items={virtualizedItems}
         estimateSize={ESTIMATE_SIZE}
         gap={12}
-        overscan={5}
+        overscan={10}
         getItemKey={getItemKey}
         renderItem={renderItem}
         onScroll={handleScroll}
+        onBecameVisible={handleBecameVisible}
         className="absolute inset-0 bg-gray-1 p-2"
         innerClassName="mx-auto max-w-[750px]"
         footer={

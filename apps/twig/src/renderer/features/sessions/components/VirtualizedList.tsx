@@ -1,3 +1,4 @@
+import type { ScrollAnchor } from "@features/sessions/stores/sessionViewStore";
 import {
   type ScrollToOptions,
   useVirtualizer,
@@ -32,6 +33,8 @@ interface VirtualizedListProps<T> {
     scrollHeight: number,
     clientHeight: number,
   ) => void;
+  /** Called when the scroll container transitions from hidden (0 height) to visible */
+  onBecameVisible?: () => void;
 }
 
 export interface VirtualizedListHandle {
@@ -39,6 +42,7 @@ export interface VirtualizedListHandle {
   scrollToOffset: (offset: number, options?: ScrollToOptions) => void;
   scrollToBottom: () => void;
   measure: () => void;
+  getScrollAnchor: () => ScrollAnchor | null;
 }
 
 function VirtualizedListInner<T>(
@@ -56,10 +60,12 @@ function VirtualizedListInner<T>(
     paddingEnd,
     footer,
     onScroll,
+    onBecameVisible,
   }: VirtualizedListProps<T>,
   ref: React.ForwardedRef<VirtualizedListHandle>,
 ) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const prevHeightRef = useRef(0);
 
   const virtualizer = useVirtualizer({
     count: items.length,
@@ -84,9 +90,29 @@ function VirtualizedListInner<T>(
       scrollToBottom: () => {
         if (items.length > 0) {
           virtualizer.scrollToIndex(items.length - 1, { align: "end" });
+          // Re-scroll after measurements settle to fix position drift
+          requestAnimationFrame(() => {
+            virtualizer.scrollToIndex(items.length - 1, { align: "end" });
+          });
         }
       },
       measure: () => virtualizer.measure(),
+      getScrollAnchor: () => {
+        const el = scrollRef.current;
+        if (!el) return null;
+        const visibleItems = virtualizer.getVirtualItems();
+        if (visibleItems.length === 0) return null;
+        const scrollTop = el.scrollTop;
+        // Find the first item whose bottom edge is below the scroll top
+        const firstVisible = visibleItems.find(
+          (item) => item.start + item.size > scrollTop,
+        );
+        if (!firstVisible) return null;
+        return {
+          index: firstVisible.index,
+          offsetFromTop: scrollTop - firstVisible.start,
+        };
+      },
     }),
     [virtualizer, items.length],
   );
@@ -112,11 +138,34 @@ function VirtualizedListInner<T>(
     return () => el.removeEventListener("scroll", handleScroll);
   }, [handleScroll, onScroll]);
 
+  // Detect when container transitions from hidden (0 height) to visible
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !onBecameVisible) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const newHeight = entry.contentRect.height;
+        if (prevHeightRef.current === 0 && newHeight > 0) {
+          virtualizer.measure();
+          onBecameVisible();
+        }
+        prevHeightRef.current = newHeight;
+      }
+    });
+
+    // Initialize with current height
+    prevHeightRef.current = el.clientHeight;
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [onBecameVisible, virtualizer]);
+
   const virtualItems = virtualizer.getVirtualItems();
 
   return (
     <div
       ref={scrollRef}
+      data-scroll-container
       className={className ?? ""}
       style={{
         height: "100%",
