@@ -62,6 +62,7 @@ function getArtefactsUnavailableMessage(
 export function InboxSignalsTab({ onGoToSetup }: InboxSignalsTabProps) {
   const { data, isLoading, isFetching, error, refetch } = useInboxReports({
     status: "ready",
+    ordering: "-total_weight",
   });
   const reports = data?.results ?? [];
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
@@ -241,7 +242,11 @@ export function InboxSignalsTab({ onGoToSetup }: InboxSignalsTabProps) {
   return (
     <Flex height="100%" style={{ minHeight: 0 }}>
       <Box flexGrow="1" style={{ minWidth: 0 }}>
-        <ScrollArea type="auto" style={{ height: "100%" }}>
+        <ScrollArea
+          type="auto"
+          className="scroll-area-constrain-width"
+          style={{ height: "100%" }}
+        >
           <Flex direction="column">
             <Flex
               align="center"
