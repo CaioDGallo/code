@@ -1,5 +1,6 @@
 import { Skeleton } from "@radix-ui/themes";
-import { trpcReact } from "@renderer/trpc";
+import { useTRPC } from "@renderer/trpc";
+import { useQuery } from "@tanstack/react-query";
 
 function formatSize(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -17,9 +18,12 @@ interface WorktreeSizeProps {
 }
 
 export function WorktreeSize({ worktreePath }: WorktreeSizeProps) {
-  const { data, isLoading } = trpcReact.workspace.getWorktreeSize.useQuery(
-    { worktreePath },
-    { staleTime: 60_000 },
+  const trpc = useTRPC();
+  const { data, isLoading } = useQuery(
+    trpc.workspace.getWorktreeSize.queryOptions(
+      { worktreePath },
+      { staleTime: 60_000 },
+    ),
   );
 
   if (isLoading) {

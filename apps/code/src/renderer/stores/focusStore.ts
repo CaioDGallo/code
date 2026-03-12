@@ -1,5 +1,5 @@
+import { invalidateGitBranchQueries } from "@features/git-interaction/utils/gitCacheKeys";
 import type { FocusResult, FocusSession } from "@main/services/focus/schemas";
-import { queryClient } from "@utils/queryClient";
 import { create } from "zustand";
 import {
   type FocusSagaResult,
@@ -25,13 +25,6 @@ interface FocusState {
   updateSessionBranch: (worktreePath: string, newBranch: string) => void;
 }
 
-function invalidateQueries() {
-  queryClient.invalidateQueries({ queryKey: ["current-branch"] });
-  queryClient.invalidateQueries({ queryKey: ["diff-stats"] });
-  queryClient.invalidateQueries({ queryKey: ["changed-files-head"] });
-  queryClient.invalidateQueries({ queryKey: ["git-sync-status"] });
-}
-
 export const useFocusStore = create<FocusState>()((set, get) => ({
   session: null,
   isLoading: false,
@@ -46,7 +39,7 @@ export const useFocusStore = create<FocusState>()((set, get) => ({
       isLoading: false,
       session: result.success ? result.session : get().session,
     });
-    if (result.success) invalidateQueries();
+    if (result.success) invalidateGitBranchQueries(params.mainRepoPath);
     return result;
   },
 
@@ -57,7 +50,7 @@ export const useFocusStore = create<FocusState>()((set, get) => ({
     set({ isLoading: true });
     const result = await runDisableFocusSaga(session);
     set({ isLoading: false, session: result.success ? null : session });
-    if (result.success) invalidateQueries();
+    if (result.success) invalidateGitBranchQueries(session.mainRepoPath);
     return result;
   },
 

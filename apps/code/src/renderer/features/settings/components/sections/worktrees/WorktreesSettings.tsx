@@ -1,8 +1,9 @@
 import { useFolders } from "@features/folders/hooks/useFolders";
 import { useDeleteTask, useTasks } from "@features/tasks/hooks/useTasks";
 import { Flex, Text } from "@radix-ui/themes";
-import { trpcReact, trpcVanilla } from "@renderer/trpc";
+import { trpcClient, useTRPC } from "@renderer/trpc";
 import type { Task } from "@shared/types";
+import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import { logger } from "@utils/logger";
 import { useCallback, useMemo, useState } from "react";
 import type { WorktreeGroup } from "./WorktreeGroupSection";
@@ -11,8 +12,11 @@ import { WorktreeGroupSection } from "./WorktreeGroupSection";
 const log = logger.scope("worktrees-settings");
 
 export function WorktreesSettings() {
-  const utils = trpcReact.useUtils();
-  const deleteWorkspaceMutation = trpcReact.workspace.delete.useMutation();
+  const trpc = useTRPC();
+  const queryClient = useQueryClient();
+  const deleteWorkspaceMutation = useMutation(
+    trpc.workspace.delete.mutationOptions(),
+  );
   const { mutateAsync: deleteTask } = useDeleteTask();
   const [deletingWorktrees, setDeletingWorktrees] = useState<Set<string>>(
     new Set(),
@@ -21,14 +25,14 @@ export function WorktreesSettings() {
   const { folders } = useFolders();
   const { data: tasks } = useTasks();
 
-  const worktreeQueries = trpcReact.useQueries((t) =>
-    folders.map((folder) =>
-      t.workspace.listGitWorktrees(
+  const worktreeQueries = useQueries({
+    queries: folders.map((folder) =>
+      trpc.workspace.listGitWorktrees.queryOptions(
         { mainRepoPath: folder.path },
         { staleTime: 30_000 },
       ),
     ),
-  );
+  });
 
   const worktreeGroups = useMemo(() => {
     const groups: WorktreeGroup[] = [];
@@ -72,7 +76,7 @@ export function WorktreesSettings() {
     ) => {
       if (existingTaskIds.length > 0) {
         const result =
-          await trpcVanilla.contextMenu.confirmDeleteWorktree.mutate({
+          await trpcClient.contextMenu.confirmDeleteWorktree.mutate({
             worktreePath,
             linkedTaskCount: existingTaskIds.length,
           });
@@ -90,7 +94,7 @@ export function WorktreesSettings() {
             });
           }
         } else {
-          await trpcVanilla.workspace.deleteWorktree.mutate({
+          await trpcClient.workspace.deleteWorktree.mutate({
             worktreePath,
             mainRepoPath: folderPath,
           });
@@ -101,10 +105,12 @@ export function WorktreesSettings() {
         }
 
         await Promise.all([
-          utils.workspace.getAll.invalidate(),
-          utils.workspace.listGitWorktrees.invalidate({
-            mainRepoPath: folderPath,
-          }),
+          queryClient.invalidateQueries(trpc.workspace.getAll.pathFilter()),
+          queryClient.invalidateQueries(
+            trpc.workspace.listGitWorktrees.queryFilter({
+              mainRepoPath: folderPath,
+            }),
+          ),
         ]);
       } catch (error) {
         log.error("Failed to delete worktree:", error);
@@ -116,7 +122,7 @@ export function WorktreesSettings() {
         });
       }
     },
-    [deleteWorkspaceMutation, deleteTask, utils],
+    [deleteWorkspaceMutation, deleteTask, queryClient, trpc],
   );
 
   const isLoading = worktreeQueries.some((q) => q.isLoading);

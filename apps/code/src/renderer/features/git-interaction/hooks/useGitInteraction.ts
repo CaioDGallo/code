@@ -14,8 +14,9 @@ import {
   sanitizeBranchName,
   validateBranchName,
 } from "@features/git-interaction/utils/branchNameValidation";
+import { invalidateGitBranchQueries } from "@features/git-interaction/utils/gitCacheKeys";
 import { updateGitCacheFromSnapshot } from "@features/git-interaction/utils/updateGitCache";
-import { trpcVanilla } from "@renderer/trpc";
+import { trpc, trpcClient } from "@renderer/trpc";
 import { ANALYTICS_EVENTS } from "@shared/types/analytics";
 import { useQueryClient } from "@tanstack/react-query";
 import { track } from "@utils/analytics";
@@ -143,7 +144,7 @@ export function useGitInteraction(
 
     modal.setIsGeneratingPr(true);
     try {
-      const result = await trpcVanilla.git.generatePrTitleAndBody.mutate({
+      const result = await trpcClient.git.generatePrTitleAndBody.mutate({
         directoryPath: repoPath,
         credentials: { apiKey, apiHost },
       });
@@ -173,11 +174,11 @@ export function useGitInteraction(
 
   const viewPr = async () => {
     if (!repoPath) return;
-    const result = await trpcVanilla.git.openPr.mutate({
+    const result = await trpcClient.git.openPr.mutate({
       directoryPath: repoPath,
     });
     if (result.success && result.prUrl) {
-      await trpcVanilla.os.openExternal.mutate({ url: result.prUrl });
+      await trpcClient.os.openExternal.mutate({ url: result.prUrl });
     }
   };
 
@@ -218,7 +219,7 @@ export function useGitInteraction(
           : "https://us.posthog.com";
 
       try {
-        const generated = await trpcVanilla.git.generateCommitMessage.mutate({
+        const generated = await trpcClient.git.generateCommitMessage.mutate({
           directoryPath: repoPath,
           credentials: { apiKey, apiHost },
         });
@@ -246,7 +247,7 @@ export function useGitInteraction(
     }
 
     try {
-      const result = await trpcVanilla.git.commit.mutate({
+      const result = await trpcClient.git.commit.mutate({
         directoryPath: repoPath,
         message,
       });
@@ -289,10 +290,10 @@ export function useGitInteraction(
     try {
       const pushFn =
         store.pushMode === "sync"
-          ? trpcVanilla.git.sync
+          ? trpcClient.git.sync
           : store.pushMode === "publish"
-            ? trpcVanilla.git.publish
-            : trpcVanilla.git.push;
+            ? trpcClient.git.publish
+            : trpcClient.git.push;
 
       const result = await pushFn.mutate({ directoryPath: repoPath });
 
@@ -342,8 +343,8 @@ export function useGitInteraction(
     try {
       if (!git.hasRemote || git.aheadOfRemote > 0) {
         const pushFn = git.hasRemote
-          ? trpcVanilla.git.push
-          : trpcVanilla.git.publish;
+          ? trpcClient.git.push
+          : trpcClient.git.publish;
         const pushResult = await pushFn.mutate({ directoryPath: repoPath });
 
         if (!pushResult.success) {
@@ -359,7 +360,7 @@ export function useGitInteraction(
         }
       }
 
-      const result = await trpcVanilla.git.createPr.mutate({
+      const result = await trpcClient.git.createPr.mutate({
         directoryPath: repoPath,
         title,
         body,
@@ -378,7 +379,7 @@ export function useGitInteraction(
         updateGitCacheFromSnapshot(queryClient, repoPath, result.state);
       }
 
-      await trpcVanilla.os.openExternal.mutate({ url: result.prUrl });
+      await trpcClient.os.openExternal.mutate({ url: result.prUrl });
       modal.closePr();
     } finally {
       modal.setIsSubmitting(false);
@@ -408,7 +409,7 @@ export function useGitInteraction(
     modal.setCommitError(null);
 
     try {
-      const result = await trpcVanilla.git.generateCommitMessage.mutate({
+      const result = await trpcClient.git.generateCommitMessage.mutate({
         directoryPath: repoPath,
         credentials: { apiKey, apiHost },
       });
@@ -453,7 +454,7 @@ export function useGitInteraction(
     modal.setPrError(null);
 
     try {
-      const result = await trpcVanilla.git.generatePrTitleAndBody.mutate({
+      const result = await trpcClient.git.generatePrTitleAndBody.mutate({
         directoryPath: repoPath,
         credentials: { apiKey, apiHost },
       });
@@ -495,20 +496,15 @@ export function useGitInteraction(
     modal.setBranchError(null);
 
     try {
-      await trpcVanilla.git.createBranch.mutate({
+      await trpcClient.git.createBranch.mutate({
         directoryPath: repoPath,
         branchName,
       });
 
       trackGitAction(taskId, "branch-here", true);
 
-      await queryClient.invalidateQueries({
-        queryKey: [["workspace", "getAll"]],
-      });
-
-      await queryClient.invalidateQueries({
-        queryKey: ["git-sync-status", repoPath],
-      });
+      invalidateGitBranchQueries(repoPath);
+      await queryClient.invalidateQueries(trpc.workspace.getAll.pathFilter());
 
       modal.closeBranch();
     } catch (error) {

@@ -2,24 +2,38 @@ import type {
   Workspace,
   WorkspaceMode,
 } from "@main/services/workspace/schemas";
-import { trpcReact, trpcVanilla } from "@renderer/trpc/client";
+import { trpcClient, useTRPC } from "@renderer/trpc/client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 
 function useWorkspacesQuery() {
-  return trpcReact.workspace.getAll.useQuery(undefined, {
-    staleTime: 1000 * 60,
-  });
+  const trpcReact = useTRPC();
+  return useQuery(
+    trpcReact.workspace.getAll.queryOptions(undefined, {
+      staleTime: 1000 * 60,
+    }),
+  );
 }
 
-async function invalidateWorkspaceCaches(
-  utils: ReturnType<typeof trpcReact.useUtils>,
-  mainRepoPath?: string,
-) {
-  const tasks = [utils.workspace.getAll.invalidate()];
-  if (mainRepoPath) {
-    tasks.push(utils.workspace.listGitWorktrees.invalidate({ mainRepoPath }));
-  }
-  await Promise.all(tasks);
+function useInvalidateWorkspaceCaches() {
+  const trpcReact = useTRPC();
+  const queryClient = useQueryClient();
+  return useCallback(
+    async (mainRepoPath?: string) => {
+      const tasks: Promise<void>[] = [
+        queryClient.invalidateQueries(trpcReact.workspace.getAll.pathFilter()),
+      ];
+      if (mainRepoPath) {
+        tasks.push(
+          queryClient.invalidateQueries(
+            trpcReact.workspace.listGitWorktrees.queryFilter({ mainRepoPath }),
+          ),
+        );
+      }
+      await Promise.all(tasks);
+    },
+    [queryClient, trpcReact],
+  );
 }
 
 export function useWorkspaces(): {
@@ -44,25 +58,31 @@ export function useWorkspaceLoaded(): boolean {
 }
 
 export function useCreateWorkspace(): { isPending: boolean } {
-  const utils = trpcReact.useUtils();
+  const trpcReact = useTRPC();
+  const invalidateCaches = useInvalidateWorkspaceCaches();
 
-  const mutation = trpcReact.workspace.create.useMutation({
-    onSuccess: (_data, variables) => {
-      void invalidateWorkspaceCaches(utils, variables.mainRepoPath);
-    },
-  });
+  const mutation = useMutation(
+    trpcReact.workspace.create.mutationOptions({
+      onSuccess: (_data, variables) => {
+        void invalidateCaches(variables.mainRepoPath);
+      },
+    }),
+  );
 
   return { isPending: mutation.isPending };
 }
 
 export function useDeleteWorkspace(): { isPending: boolean } {
-  const utils = trpcReact.useUtils();
+  const trpcReact = useTRPC();
+  const invalidateCaches = useInvalidateWorkspaceCaches();
 
-  const mutation = trpcReact.workspace.delete.useMutation({
-    onSuccess: (_data, variables) => {
-      void invalidateWorkspaceCaches(utils, variables.mainRepoPath);
-    },
-  });
+  const mutation = useMutation(
+    trpcReact.workspace.delete.mutationOptions({
+      onSuccess: (_data, variables) => {
+        void invalidateCaches(variables.mainRepoPath);
+      },
+    }),
+  );
 
   return { isPending: mutation.isPending };
 }
@@ -75,7 +95,8 @@ export function useRunStartScripts(): {
   }) => Promise<{ success: boolean; terminalSessionIds: string[] }>;
   isPending: boolean;
 } {
-  const mutation = trpcReact.workspace.runStart.useMutation();
+  const trpcReact = useTRPC();
+  const mutation = useMutation(trpcReact.workspace.runStart.mutationOptions());
   return { mutateAsync: mutation.mutateAsync, isPending: mutation.isPending };
 }
 
@@ -88,12 +109,17 @@ export function useEnsureWorkspace(): {
   ) => Promise<Workspace | null>;
   isCreating: boolean;
 } {
-  const utils = trpcReact.useUtils();
-  const createMutation = trpcReact.workspace.create.useMutation({
-    onSuccess: (_data, variables) => {
-      void invalidateWorkspaceCaches(utils, variables.mainRepoPath);
-    },
-  });
+  const trpcReact = useTRPC();
+  const queryClient = useQueryClient();
+  const invalidateCaches = useInvalidateWorkspaceCaches();
+
+  const createMutation = useMutation(
+    trpcReact.workspace.create.mutationOptions({
+      onSuccess: (_data, variables) => {
+        void invalidateCaches(variables.mainRepoPath);
+      },
+    }),
+  );
 
   const ensureWorkspace = useCallback(
     async (
@@ -102,7 +128,9 @@ export function useEnsureWorkspace(): {
       mode: WorkspaceMode = "worktree",
       branch?: string | null,
     ): Promise<Workspace | null> => {
-      const existing = utils.workspace.getAll.getData()?.[taskId];
+      const existing = queryClient.getQueryData(
+        trpcReact.workspace.getAll.queryKey(),
+      )?.[taskId];
       if (existing) {
         return existing;
       }
@@ -120,10 +148,14 @@ export function useEnsureWorkspace(): {
         throw new Error("Failed to create workspace");
       }
 
-      await invalidateWorkspaceCaches(utils, repoPath);
-      return utils.workspace.getAll.getData()?.[taskId] ?? null;
+      await invalidateCaches(repoPath);
+      return (
+        queryClient.getQueryData(trpcReact.workspace.getAll.queryKey())?.[
+          taskId
+        ] ?? null
+      );
     },
-    [createMutation, utils],
+    [createMutation, queryClient, trpcReact, invalidateCaches],
   );
 
   return {
@@ -134,11 +166,11 @@ export function useEnsureWorkspace(): {
 
 export const workspaceApi = {
   async getAll(): Promise<Record<string, Workspace>> {
-    return (await trpcVanilla.workspace.getAll.query()) ?? {};
+    return (await trpcClient.workspace.getAll.query()) ?? {};
   },
 
   async get(taskId: string): Promise<Workspace | null> {
-    const workspaces = await trpcVanilla.workspace.getAll.query();
+    const workspaces = await trpcClient.workspace.getAll.query();
     return workspaces?.[taskId] ?? null;
   },
 
@@ -150,14 +182,14 @@ export const workspaceApi = {
     mode: WorkspaceMode;
     branch?: string;
   }) {
-    return trpcVanilla.workspace.create.mutate(options);
+    return trpcClient.workspace.create.mutate(options);
   },
 
   async delete(taskId: string, mainRepoPath: string) {
-    return trpcVanilla.workspace.delete.mutate({ taskId, mainRepoPath });
+    return trpcClient.workspace.delete.mutate({ taskId, mainRepoPath });
   },
 
   async verify(taskId: string) {
-    return trpcVanilla.workspace.verify.query({ taskId });
+    return trpcClient.workspace.verify.query({ taskId });
   },
 };
