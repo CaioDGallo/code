@@ -6,7 +6,6 @@ import { ChangesPanel } from "@features/task-detail/components/ChangesPanel";
 import { FileTreePanel } from "@features/task-detail/components/FileTreePanel";
 import { TaskLogsPanel } from "@features/task-detail/components/TaskLogsPanel";
 import { TaskShellPanel } from "@features/task-detail/components/TaskShellPanel";
-import { WorkspaceTerminalPanel } from "@features/workspace/components/WorkspaceTerminalPanel";
 import type { Task } from "@shared/types";
 
 interface TabContentRendererProps {
@@ -29,15 +28,6 @@ export function TabContentRenderer({
     case "terminal":
       return (
         <TaskShellPanel taskId={taskId} task={task} shellId={data.terminalId} />
-      );
-
-    case "workspace-terminal":
-      return (
-        <WorkspaceTerminalPanel
-          sessionId={data.sessionId}
-          command={data.command}
-          scriptType={data.scriptType}
-        />
       );
 
     case "file":

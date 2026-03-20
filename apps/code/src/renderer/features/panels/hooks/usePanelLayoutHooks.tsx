@@ -98,10 +98,7 @@ export function useTabInjection(
           if (tab.data.type === "file" || tab.data.type === "diff") {
             const filename = tab.data.relativePath.split("/").pop() || "";
             icon = <FileIcon filename={filename} size={14} />;
-          } else if (
-            tab.data.type === "terminal" ||
-            tab.data.type === "workspace-terminal"
-          ) {
+          } else if (tab.data.type === "terminal") {
             icon = <Terminal size={14} />;
           } else if (tab.data.type === "logs") {
             icon = <ChatCenteredText size={14} />;

@@ -177,8 +177,6 @@ export class TaskCreationSaga extends Saga<
         baseBranch: workspaceInfo.worktree?.baseBranch ?? null,
         createdAt:
           workspaceInfo.worktree?.createdAt ?? new Date().toISOString(),
-        terminalSessionIds: workspaceInfo.terminalSessionIds,
-        hasStartScripts: workspaceInfo.hasStartScripts,
       };
     } else if (workspaceMode === "cloud") {
       await this.step({
@@ -214,8 +212,6 @@ export class TaskCreationSaga extends Saga<
         branchName: null,
         baseBranch: branch,
         createdAt: new Date().toISOString(),
-        terminalSessionIds: [],
-        hasStartScripts: false,
       };
     }
 
