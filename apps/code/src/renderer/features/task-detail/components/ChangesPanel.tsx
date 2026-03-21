@@ -1,503 +1,253 @@
-import { FileIcon } from "@components/ui/FileIcon";
 import { PanelMessage } from "@components/ui/PanelMessage";
-import { Tooltip } from "@components/ui/Tooltip";
-import { useExternalApps } from "@features/external-apps/hooks/useExternalApps";
 import {
   useCloudBranchChangedFiles,
   useCloudPrChangedFiles,
   useGitQueries,
 } from "@features/git-interaction/hooks/useGitQueries";
-import { updateGitCacheFromSnapshot } from "@features/git-interaction/utils/updateGitCache";
 import { usePanelLayoutStore } from "@features/panels/store/panelLayoutStore";
 import {
   isCloudDiffTabActiveInTree,
   isDiffTabActiveInTree,
 } from "@features/panels/store/panelStoreHelpers";
+import {
+  type ChangesViewMode,
+  selectChangesExpandedPaths,
+  selectChangesViewMode,
+  selectIsChangesRootExpanded,
+  useChangesPanelStore,
+} from "@features/right-sidebar/stores/changesPanelStore";
 import { usePendingPermissionsForTask } from "@features/sessions/stores/sessionStore";
 import { useCwd } from "@features/sidebar/hooks/useCwd";
+import { ChangesCloudFileRow } from "@features/task-detail/components/ChangesCloudFileRow";
+import { ChangesFilesView } from "@features/task-detail/components/ChangesFilesView";
+import { ChangesLocalFileRow } from "@features/task-detail/components/ChangesLocalFileRow";
+import { useChangesKeyboardNavigation } from "@features/task-detail/hooks/useChangesKeyboardNavigation";
 import { useCloudRunState } from "@features/task-detail/hooks/useCloudRunState";
 import {
-  ArrowCounterClockwiseIcon,
-  CaretDownIcon,
-  CaretUpIcon,
-  CodeIcon,
-  CopyIcon,
-  FilePlus,
-} from "@phosphor-icons/react";
+  buildChangesTreeModel,
+  buildVisibleTreeRowIds,
+  type ChangesTreeModel,
+  collapseDirectoryInVisibleRows,
+  collectDirectoryPaths,
+  collectInitialExpandedPaths,
+  expandDirectoryInVisibleRows,
+  getChangedFileId,
+} from "@features/task-detail/utils/changesTreeModel";
+import { getCloudChangesState } from "@features/task-detail/utils/getCloudChangesState";
 import {
-  Badge,
-  Box,
-  Button,
-  DropdownMenu,
-  Flex,
-  IconButton,
-  Spinner,
-  Text,
-} from "@radix-ui/themes";
+  CaretDownIcon,
+  CaretLeftIcon,
+  CaretRightIcon,
+  CaretUpIcon,
+} from "@phosphor-icons/react";
+import { Box, Button, Flex, Spinner, Text } from "@radix-ui/themes";
 import { useWorkspace } from "@renderer/features/workspace/hooks/useWorkspace";
-import { trpcClient } from "@renderer/trpc/client";
-import type { ChangedFile, GitFileStatus, Task } from "@shared/types";
-import { useQueryClient } from "@tanstack/react-query";
-import { showMessageBox } from "@utils/dialog";
-import { handleExternalAppAction } from "@utils/handleExternalAppAction";
-import { useCallback, useState } from "react";
-import { useHotkeys } from "react-hotkeys-hook";
+import type { ChangedFile, Task } from "@shared/types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface ChangesPanelProps {
   taskId: string;
   task: Task;
 }
 
-interface ChangedFileItemProps {
-  file: ChangedFile;
-  taskId: string;
-  repoPath: string;
-  isActive: boolean;
-  mainRepoPath?: string;
+function getBaseName(path: string | null | undefined): string | null {
+  if (!path) return null;
+  const normalized = path.replaceAll("\\", "/").replace(/\/+$/, "");
+  if (!normalized) return null;
+  return normalized.split("/").pop() || null;
 }
 
-function getStatusIndicator(status: GitFileStatus): {
-  label: string;
-  fullLabel: string;
-  color: "green" | "orange" | "red" | "blue" | "gray";
-} {
-  switch (status) {
-    case "added":
-    case "untracked":
-      return { label: "A", fullLabel: "Added", color: "green" };
-    case "deleted":
-      return { label: "D", fullLabel: "Deleted", color: "red" };
-    case "modified":
-      return { label: "M", fullLabel: "Modified", color: "orange" };
-    case "renamed":
-      return { label: "R", fullLabel: "Renamed", color: "blue" };
-    default:
-      return { label: "?", fullLabel: "Unknown", color: "gray" };
-  }
+function getRepositoryName(
+  repository: string | null | undefined,
+): string | null {
+  if (!repository) return null;
+  return repository.split("/").pop() || null;
 }
 
-function getDiscardInfo(
-  file: ChangedFile,
-  fileName: string,
-): { message: string; action: string } {
-  switch (file.status) {
-    case "modified":
-      return {
-        message: `Are you sure you want to discard changes in '${fileName}'?`,
-        action: "Discard File",
-      };
-    case "deleted":
-      return {
-        message: `Are you sure you want to restore '${fileName}'?`,
-        action: "Restore File",
-      };
-    case "added":
-      return {
-        message: `Are you sure you want to remove '${fileName}'?`,
-        action: "Remove File",
-      };
-    case "untracked":
-      return {
-        message: `Are you sure you want to delete '${fileName}'?`,
-        action: "Delete File",
-      };
-    case "renamed":
-      return {
-        message: `Are you sure you want to undo the rename of '${fileName}'?`,
-        action: "Undo Rename File",
-      };
-    default:
-      return {
-        message: `Are you sure you want to discard changes in '${fileName}'?`,
-        action: "Discard File",
-      };
-  }
+interface UseChangesTreeViewStateResult {
+  treeModel: ChangesTreeModel;
+  allDirectoryPaths: string[];
+  visibleTreeRowIds: string[];
+  expandedPaths: Set<string>;
+  setDirectoryExpanded: (
+    directoryPath: string,
+    directoryId: string,
+    expanded: boolean,
+  ) => void;
+  toggleDirectory: (directoryPath: string, directoryId: string) => void;
+  expandAllDirectories: () => void;
+  collapseAllDirectories: () => void;
 }
 
-function ChangedFileItem({
-  file,
-  taskId,
-  repoPath,
-  isActive,
-  mainRepoPath,
-}: ChangedFileItemProps) {
-  const openDiffByMode = usePanelLayoutStore((state) => state.openDiffByMode);
-  const closeDiffTabsForFile = usePanelLayoutStore(
-    (state) => state.closeDiffTabsForFile,
+function useChangesTreeViewState(
+  taskId: string,
+  files: ChangedFile[],
+  viewMode: ChangesViewMode,
+): UseChangesTreeViewStateResult {
+  const expandedPaths = useChangesPanelStore(
+    selectChangesExpandedPaths(taskId),
   );
-  const queryClient = useQueryClient();
-  const { detectedApps } = useExternalApps();
-  const workspace = useWorkspace(taskId);
+  const expandPaths = useChangesPanelStore((state) => state.expandPaths);
+  const setPathExpanded = useChangesPanelStore(
+    (state) => state.setPathExpanded,
+  );
+  const setExpandedPaths = useChangesPanelStore(
+    (state) => state.setExpandedPaths,
+  );
+  const collapseAll = useChangesPanelStore((state) => state.collapseAll);
+  const pruneExpandedPaths = useChangesPanelStore(
+    (state) => state.pruneExpandedPaths,
+  );
 
-  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
-  const [isHovered, setIsHovered] = useState(false);
+  const treeModel = useMemo(() => buildChangesTreeModel(files), [files]);
+  const allDirectoryPaths = useMemo(
+    () => collectDirectoryPaths(treeModel),
+    [treeModel],
+  );
 
-  // show toolbar when hovered OR when dropdown is open
-  const isToolbarVisible = isHovered || isDropdownOpen;
+  const [visibleTreeRowIds, setVisibleTreeRowIds] = useState<string[]>(() =>
+    buildVisibleTreeRowIds(treeModel, expandedPaths),
+  );
 
-  const fileName = file.path.split("/").pop() || file.path;
-  const fullPath = `${repoPath}/${file.path}`;
-  const indicator = getStatusIndicator(file.status);
+  const skipExpandedSyncRef = useRef(false);
+  const previousTreeModelRef = useRef(treeModel);
+  const previousViewModeRef = useRef<ChangesViewMode | null>(null);
 
-  const handleClick = () => {
-    openDiffByMode(taskId, file.path, file.status);
-  };
+  useEffect(() => {
+    pruneExpandedPaths(taskId, allDirectoryPaths);
+  }, [allDirectoryPaths, pruneExpandedPaths, taskId]);
 
-  const handleDoubleClick = () => {
-    openDiffByMode(taskId, file.path, file.status, false);
-  };
+  useEffect(() => {
+    const treeChanged = previousTreeModelRef.current !== treeModel;
+    previousTreeModelRef.current = treeModel;
 
-  const workspaceContext = {
-    workspace,
-    mainRepoPath,
-  };
-
-  const handleContextMenu = async (e: React.MouseEvent) => {
-    e.preventDefault();
-    const result = await trpcClient.contextMenu.showFileContextMenu.mutate({
-      filePath: fullPath,
-    });
-
-    if (!result.action) return;
-
-    if (result.action.type === "external-app") {
-      await handleExternalAppAction(
-        result.action.action,
-        fullPath,
-        fileName,
-        workspaceContext,
-      );
+    if (treeChanged) {
+      skipExpandedSyncRef.current = false;
+      setVisibleTreeRowIds(buildVisibleTreeRowIds(treeModel, expandedPaths));
+      return;
     }
-  };
 
-  const handleOpenWith = async (appId: string) => {
-    await handleExternalAppAction(
-      { type: "open-in-app", appId },
-      fullPath,
-      fileName,
-      workspaceContext,
+    if (skipExpandedSyncRef.current) {
+      skipExpandedSyncRef.current = false;
+      return;
+    }
+
+    setVisibleTreeRowIds(buildVisibleTreeRowIds(treeModel, expandedPaths));
+  }, [expandedPaths, treeModel]);
+
+  useEffect(() => {
+    const previousViewMode = previousViewModeRef.current;
+    previousViewModeRef.current = viewMode;
+
+    const isInitialTreeLoad = previousViewMode === null && viewMode === "tree";
+    const isEnteringTree =
+      previousViewMode !== null &&
+      previousViewMode !== "tree" &&
+      viewMode === "tree";
+
+    if (!isInitialTreeLoad && !isEnteringTree) {
+      return;
+    }
+
+    const hasExpandedVisiblePath = allDirectoryPaths.some((path) =>
+      expandedPaths.has(path),
     );
-
-    // blur active element to dismiss any open tooltip
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
+    if (hasExpandedVisiblePath) {
+      return;
     }
-  };
 
-  const handleCopyPath = async () => {
-    await handleExternalAppAction({ type: "copy-path" }, fullPath, fileName);
-  };
-
-  const handleDiscard = async (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    const { message, action } = getDiscardInfo(file, fileName);
-
-    const dialogResult = await showMessageBox({
-      type: "warning",
-      title: "Discard changes",
-      message,
-      buttons: ["Cancel", action],
-      defaultId: 1,
-      cancelId: 0,
-    });
-
-    if (dialogResult.response !== 1) return;
-
-    const discardResult = await trpcClient.git.discardFileChanges.mutate({
-      directoryPath: repoPath,
-      filePath: file.originalPath ?? file.path,
-      fileStatus: file.status,
-    });
-
-    closeDiffTabsForFile(taskId, file.path);
-
-    if (discardResult.state) {
-      updateGitCacheFromSnapshot(queryClient, repoPath, discardResult.state);
+    const initialExpandedPaths = collectInitialExpandedPaths(treeModel);
+    if (initialExpandedPaths.length === 0) {
+      return;
     }
-  };
 
-  const hasLineStats =
-    file.linesAdded !== undefined || file.linesRemoved !== undefined;
+    const nextExpandedPaths = new Set(expandedPaths);
+    for (const path of initialExpandedPaths) {
+      nextExpandedPaths.add(path);
+    }
 
-  const tooltipContent = `${file.path} - ${indicator.fullLabel}`;
+    skipExpandedSyncRef.current = true;
+    expandPaths(taskId, initialExpandedPaths);
+    setVisibleTreeRowIds(buildVisibleTreeRowIds(treeModel, nextExpandedPaths));
+  }, [
+    allDirectoryPaths,
+    expandedPaths,
+    expandPaths,
+    taskId,
+    treeModel,
+    viewMode,
+  ]);
 
-  return (
-    <Tooltip content={tooltipContent} side="top" delayDuration={500}>
-      <Flex
-        align="center"
-        gap="1"
-        onClick={handleClick}
-        onDoubleClick={handleDoubleClick}
-        onContextMenu={handleContextMenu}
-        onMouseEnter={() => setIsHovered(true)}
-        onMouseLeave={() => setIsHovered(false)}
-        className={
-          isActive
-            ? "border-accent-8 border-y bg-accent-4"
-            : "border-transparent border-y hover:bg-gray-3"
-        }
-        style={{
-          cursor: "pointer",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          height: "26px",
-          paddingLeft: "8px",
-          paddingRight: "8px",
-        }}
-      >
-        <FileIcon filename={fileName} size={14} />
-        <Text
-          size="1"
-          style={{
-            userSelect: "none",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            marginLeft: "2px",
-            flexShrink: 1,
-            minWidth: 0,
-          }}
-        >
-          {fileName}
-        </Text>
-        <Text
-          size="1"
-          color="gray"
-          style={{
-            userSelect: "none",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            flex: 1,
-            marginLeft: "4px",
-            minWidth: 0,
-          }}
-        >
-          {file.originalPath
-            ? `${file.originalPath} → ${file.path}`
-            : file.path}
-        </Text>
+  const setDirectoryExpanded = useCallback(
+    (directoryPath: string, directoryId: string, expanded: boolean) => {
+      const isExpanded = expandedPaths.has(directoryPath);
+      if (isExpanded === expanded) {
+        return;
+      }
 
-        {hasLineStats && !isToolbarVisible && (
-          <Flex
-            align="center"
-            gap="1"
-            style={{ flexShrink: 0, fontSize: "10px", fontFamily: "monospace" }}
-          >
-            {(file.linesAdded ?? 0) > 0 && (
-              <Text style={{ color: "var(--green-9)" }}>
-                +{file.linesAdded}
-              </Text>
-            )}
-            {(file.linesRemoved ?? 0) > 0 && (
-              <Text style={{ color: "var(--red-9)" }}>
-                -{file.linesRemoved}
-              </Text>
-            )}
-          </Flex>
-        )}
+      skipExpandedSyncRef.current = true;
+      setPathExpanded(taskId, directoryPath, expanded);
 
-        {isToolbarVisible && (
-          <Flex align="center" gap="1" style={{ flexShrink: 0 }}>
-            <Tooltip content="Discard changes">
-              <IconButton
-                size="1"
-                variant="ghost"
-                color="gray"
-                onClick={handleDiscard}
-                style={{
-                  flexShrink: 0,
-                  width: "18px",
-                  height: "18px",
-                  padding: 0,
-                  marginLeft: "2px",
-                  marginRight: "2px",
-                }}
-              >
-                <ArrowCounterClockwiseIcon size={12} />
-              </IconButton>
-            </Tooltip>
+      if (expanded) {
+        const nextExpandedPaths = new Set(expandedPaths);
+        nextExpandedPaths.add(directoryPath);
+        setVisibleTreeRowIds((currentRows) =>
+          expandDirectoryInVisibleRows(
+            currentRows,
+            treeModel,
+            directoryId,
+            nextExpandedPaths,
+          ),
+        );
+        return;
+      }
 
-            <DropdownMenu.Root
-              open={isDropdownOpen}
-              onOpenChange={setIsDropdownOpen}
-            >
-              <Tooltip content="Open file">
-                <DropdownMenu.Trigger>
-                  <IconButton
-                    size="1"
-                    variant="ghost"
-                    color="gray"
-                    onClick={(e) => e.stopPropagation()}
-                    style={{
-                      flexShrink: 0,
-                      width: "18px",
-                      height: "18px",
-                      padding: 0,
-                    }}
-                  >
-                    <FilePlus size={12} weight="regular" />
-                  </IconButton>
-                </DropdownMenu.Trigger>
-              </Tooltip>
-              <DropdownMenu.Content size="1" align="end">
-                {detectedApps
-                  .filter((app) => app.type !== "terminal")
-                  .map((app) => (
-                    <DropdownMenu.Item
-                      key={app.id}
-                      onSelect={() => handleOpenWith(app.id)}
-                    >
-                      <Flex align="center" gap="2">
-                        {app.icon ? (
-                          <img
-                            src={app.icon}
-                            width={16}
-                            height={16}
-                            alt=""
-                            style={{ borderRadius: "2px" }}
-                          />
-                        ) : (
-                          <CodeIcon size={16} weight="regular" />
-                        )}
-                        <Text size="1">{app.name}</Text>
-                      </Flex>
-                    </DropdownMenu.Item>
-                  ))}
-                <DropdownMenu.Separator />
-                <DropdownMenu.Item onSelect={handleCopyPath}>
-                  <Flex align="center" gap="2">
-                    <CopyIcon size={16} weight="regular" />
-                    <Text size="1">Copy Path</Text>
-                  </Flex>
-                </DropdownMenu.Item>
-              </DropdownMenu.Content>
-            </DropdownMenu.Root>
-          </Flex>
-        )}
-
-        <Badge
-          size="1"
-          color={indicator.color}
-          style={{ flexShrink: 0, fontSize: "10px", padding: "0 4px" }}
-        >
-          {indicator.label}
-        </Badge>
-      </Flex>
-    </Tooltip>
+      setVisibleTreeRowIds((currentRows) =>
+        collapseDirectoryInVisibleRows(currentRows, treeModel, directoryId),
+      );
+    },
+    [expandedPaths, setPathExpanded, taskId, treeModel],
   );
-}
 
-function CloudChangedFileItem({
-  file,
-  taskId,
-  isActive,
-}: {
-  file: ChangedFile;
-  taskId: string;
-  isActive: boolean;
-}) {
-  const openCloudDiffByMode = usePanelLayoutStore(
-    (state) => state.openCloudDiffByMode,
+  const toggleDirectory = useCallback(
+    (directoryPath: string, directoryId: string) => {
+      setDirectoryExpanded(
+        directoryPath,
+        directoryId,
+        !expandedPaths.has(directoryPath),
+      );
+    },
+    [expandedPaths, setDirectoryExpanded],
   );
-  const fileName = file.path.split("/").pop() || file.path;
-  const indicator = getStatusIndicator(file.status);
-  const hasLineStats =
-    file.linesAdded !== undefined || file.linesRemoved !== undefined;
 
-  const handleClick = () => {
-    openCloudDiffByMode(taskId, file.path, file.status);
+  const expandAllDirectories = useCallback(() => {
+    if (allDirectoryPaths.length === 0) {
+      return;
+    }
+
+    skipExpandedSyncRef.current = true;
+    setExpandedPaths(taskId, allDirectoryPaths);
+    setVisibleTreeRowIds(
+      buildVisibleTreeRowIds(treeModel, new Set(allDirectoryPaths)),
+    );
+  }, [allDirectoryPaths, setExpandedPaths, taskId, treeModel]);
+
+  const collapseAllDirectories = useCallback(() => {
+    skipExpandedSyncRef.current = true;
+    collapseAll(taskId);
+    setVisibleTreeRowIds(buildVisibleTreeRowIds(treeModel, new Set<string>()));
+  }, [collapseAll, taskId, treeModel]);
+
+  return {
+    treeModel,
+    allDirectoryPaths,
+    visibleTreeRowIds,
+    expandedPaths,
+    setDirectoryExpanded,
+    toggleDirectory,
+    expandAllDirectories,
+    collapseAllDirectories,
   };
-
-  const handleDoubleClick = () => {
-    openCloudDiffByMode(taskId, file.path, file.status, false);
-  };
-
-  return (
-    <Tooltip
-      content={`${file.path} - ${indicator.fullLabel}`}
-      side="top"
-      delayDuration={500}
-    >
-      <Flex
-        align="center"
-        gap="1"
-        onClick={handleClick}
-        onDoubleClick={handleDoubleClick}
-        className={
-          isActive
-            ? "border-accent-8 border-y bg-accent-4"
-            : "border-transparent border-y hover:bg-gray-3"
-        }
-        style={{
-          cursor: "pointer",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          height: "26px",
-          paddingLeft: "8px",
-          paddingRight: "8px",
-        }}
-      >
-        <FileIcon filename={fileName} size={14} />
-        <Text
-          size="1"
-          style={{
-            userSelect: "none",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            marginLeft: "2px",
-            flexShrink: 1,
-            minWidth: 0,
-          }}
-        >
-          {fileName}
-        </Text>
-        <Text
-          size="1"
-          color="gray"
-          style={{
-            userSelect: "none",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            flex: 1,
-            marginLeft: "4px",
-            minWidth: 0,
-          }}
-        >
-          {file.originalPath
-            ? `${file.originalPath} → ${file.path}`
-            : file.path}
-        </Text>
-
-        {hasLineStats && (
-          <Flex
-            align="center"
-            gap="1"
-            style={{ flexShrink: 0, fontSize: "10px", fontFamily: "monospace" }}
-          >
-            {(file.linesAdded ?? 0) > 0 && (
-              <Text style={{ color: "var(--green-9)" }}>
-                +{file.linesAdded}
-              </Text>
-            )}
-            {(file.linesRemoved ?? 0) > 0 && (
-              <Text style={{ color: "var(--red-9)" }}>
-                -{file.linesRemoved}
-              </Text>
-            )}
-          </Flex>
-        )}
-
-        <Badge
-          size="1"
-          color={indicator.color}
-          style={{ flexShrink: 0, fontSize: "10px", padding: "0 4px" }}
-        >
-          {indicator.label}
-        </Badge>
-      </Flex>
-    </Tooltip>
-  );
 }
 
 function CloudChangesPanel({ taskId, task }: ChangesPanelProps) {
@@ -505,20 +255,28 @@ function CloudChangesPanel({ taskId, task }: ChangesPanelProps) {
     useCloudRunState(taskId, task);
 
   const layout = usePanelLayoutStore((state) => state.getLayout(taskId));
+  const viewMode = useChangesPanelStore(selectChangesViewMode(taskId));
+  const isRootExpanded = useChangesPanelStore(
+    selectIsChangesRootExpanded(taskId),
+  );
+  const setViewMode = useChangesPanelStore((state) => state.setViewMode);
+  const toggleRoot = useChangesPanelStore((state) => state.toggleRoot);
+  const setRootExpanded = useChangesPanelStore(
+    (state) => state.setRootExpanded,
+  );
+  const [isViewOptionsMenuOpen, setIsViewOptionsMenuOpen] = useState(false);
 
   const isFileActive = (file: ChangedFile): boolean => {
     if (!layout) return false;
     return isCloudDiffTabActiveInTree(layout.panelTree, file.path, file.status);
   };
 
-  // PR-based files (preferred when PR exists, to avoid possible state weirdness)
   const {
     data: prFiles,
     isPending: prPending,
     isError: prError,
   } = useCloudPrChangedFiles(prUrl);
 
-  // Branch-based files — use effectiveBranch (includes live cloudBranch)
   const {
     data: branchFiles,
     isPending: branchPending,
@@ -531,80 +289,111 @@ function CloudChangesPanel({ taskId, task }: ChangesPanelProps) {
   const changedFiles = prUrl ? (prFiles ?? []) : (branchFiles ?? []);
   const isLoading = prUrl ? prPending : effectiveBranch ? branchPending : false;
   const hasError = prUrl ? prError : effectiveBranch ? branchError : false;
-
   const effectiveFiles = changedFiles.length > 0 ? changedFiles : fallbackFiles;
 
-  // No branch/PR yet and run is active — show waiting state
-  if (!prUrl && !effectiveBranch && effectiveFiles.length === 0) {
-    if (isRunActive) {
-      return (
-        <PanelMessage detail="Changes will appear once the agent starts writing code">
-          <Flex align="center" gap="2">
-            <Spinner size="1" />
-            <Text size="2">Waiting for changes...</Text>
-          </Flex>
-        </PanelMessage>
-      );
-    }
-    return <PanelMessage>No file changes yet</PanelMessage>;
+  const {
+    treeModel,
+    allDirectoryPaths,
+    visibleTreeRowIds,
+    expandedPaths,
+    toggleDirectory,
+    expandAllDirectories,
+    collapseAllDirectories,
+  } = useChangesTreeViewState(taskId, effectiveFiles, viewMode);
+
+  const handleExpandAllFolders = useCallback(() => {
+    setRootExpanded(taskId, true);
+    expandAllDirectories();
+  }, [expandAllDirectories, setRootExpanded, taskId]);
+
+  const cloudChangesState = getCloudChangesState({
+    prUrl,
+    effectiveBranch,
+    isRunActive,
+    effectiveFiles,
+    isLoading,
+    hasError,
+  });
+
+  if (cloudChangesState.kind === "waiting") {
+    return (
+      <PanelMessage detail={cloudChangesState.detail}>
+        <Flex align="center" gap="2">
+          <Spinner size="1" />
+          <Text size="2">Waiting for changes...</Text>
+        </Flex>
+      </PanelMessage>
+    );
   }
 
-  if (isLoading && effectiveFiles.length === 0) {
+  if (cloudChangesState.kind === "loading") {
     return <PanelMessage>Loading changes...</PanelMessage>;
   }
 
-  if (effectiveFiles.length === 0) {
-    if (hasError && prUrl) {
-      return (
-        <PanelMessage>
-          <Flex direction="column" align="center" gap="2">
-            <Text>Could not load file changes</Text>
-            <Button size="1" variant="soft" asChild>
-              <a href={prUrl} target="_blank" rel="noopener noreferrer">
-                View on GitHub
-              </a>
-            </Button>
-          </Flex>
-        </PanelMessage>
-      );
-    }
-    if (prUrl) {
-      return <PanelMessage>No file changes in pull request</PanelMessage>;
-    }
-    if (isRunActive) {
-      return (
-        <PanelMessage detail="Changes will appear as the agent modifies files">
-          <Flex align="center" gap="2">
-            <Spinner size="1" />
-            <Text size="2">Waiting for changes...</Text>
-          </Flex>
-        </PanelMessage>
-      );
-    }
-    return <PanelMessage>No file changes yet</PanelMessage>;
+  if (cloudChangesState.kind === "pr_error") {
+    return (
+      <PanelMessage>
+        <Flex direction="column" align="center" gap="2">
+          <Text>Could not load file changes</Text>
+          <Button size="1" variant="soft" asChild>
+            <a
+              href={cloudChangesState.prUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              View on GitHub
+            </a>
+          </Button>
+        </Flex>
+      </PanelMessage>
+    );
   }
 
+  if (cloudChangesState.kind === "empty") {
+    return <PanelMessage>{cloudChangesState.message}</PanelMessage>;
+  }
+
+  const rootLabel =
+    getRepositoryName(repo ?? task.repository) ?? "Cloud workspace";
+
   return (
-    <Box height="100%" overflowY="auto" py="2">
-      <Flex direction="column">
-        {effectiveFiles.map((file) => (
-          <CloudChangedFileItem
-            key={file.path}
-            file={file}
-            taskId={taskId}
-            isActive={isFileActive(file)}
-          />
-        ))}
-        {isRunActive && (
+    <ChangesFilesView
+      rootLabel={rootLabel}
+      files={effectiveFiles}
+      viewMode={viewMode}
+      isRootExpanded={isRootExpanded}
+      isViewOptionsMenuOpen={isViewOptionsMenuOpen}
+      selectedEntryId={null}
+      treeModel={treeModel}
+      visibleTreeRowIds={visibleTreeRowIds}
+      expandedPaths={expandedPaths}
+      allDirectoryPaths={allDirectoryPaths}
+      onToggleRoot={() => toggleRoot(taskId)}
+      onViewOptionsMenuOpenChange={setIsViewOptionsMenuOpen}
+      onSetViewMode={(mode) => setViewMode(taskId, mode)}
+      onToggleDirectory={toggleDirectory}
+      onExpandAllFolders={handleExpandAllFolders}
+      onCollapseAllFolders={collapseAllDirectories}
+      renderFileRow={(file, options) => (
+        <ChangesCloudFileRow
+          file={file}
+          taskId={taskId}
+          isActive={isFileActive(file)}
+          paddingLeft={options.paddingLeft}
+          showTreeSpacer={options.showTreeSpacer}
+        />
+      )}
+      footer={
+        isRunActive ? (
           <Flex align="center" gap="2" px="3" py="2">
             <Spinner size="1" />
             <Text size="1" color="gray">
               Agent is still running...
             </Text>
           </Flex>
-        )}
-      </Flex>
-    </Box>
+        ) : undefined
+      }
+    />
   );
 }
 
@@ -625,54 +414,56 @@ function LocalChangesPanel({ taskId, task: _task }: ChangesPanelProps) {
   const repoPath = useCwd(taskId);
   const layout = usePanelLayoutStore((state) => state.getLayout(taskId));
   const openDiffByMode = usePanelLayoutStore((state) => state.openDiffByMode);
+  const viewMode = useChangesPanelStore(selectChangesViewMode(taskId));
+  const isRootExpanded = useChangesPanelStore(
+    selectIsChangesRootExpanded(taskId),
+  );
+  const setViewMode = useChangesPanelStore((state) => state.setViewMode);
+  const toggleRoot = useChangesPanelStore((state) => state.toggleRoot);
+  const setRootExpanded = useChangesPanelStore(
+    (state) => state.setRootExpanded,
+  );
+  const [isViewOptionsMenuOpen, setIsViewOptionsMenuOpen] = useState(false);
   const pendingPermissions = usePendingPermissionsForTask(taskId);
   const hasPendingPermissions = pendingPermissions.size > 0;
 
   const { changedFiles, changesLoading: isLoading } = useGitQueries(repoPath);
 
-  const getActiveIndex = useCallback((): number => {
-    if (!layout) return -1;
-    return changedFiles.findIndex((file) =>
-      isDiffTabActiveInTree(layout.panelTree, file.path, file.status),
-    );
-  }, [layout, changedFiles]);
+  const {
+    treeModel,
+    allDirectoryPaths,
+    visibleTreeRowIds,
+    expandedPaths,
+    setDirectoryExpanded,
+    toggleDirectory,
+    expandAllDirectories,
+    collapseAllDirectories,
+  } = useChangesTreeViewState(taskId, changedFiles, viewMode);
 
-  const handleKeyNavigation = useCallback(
-    (direction: "up" | "down") => {
-      if (changedFiles.length === 0) return;
+  const {
+    selectedEntryId,
+    selectedDirectoryPath,
+    selectedFileId,
+    hasKeyboardSelection,
+  } = useChangesKeyboardNavigation({
+    taskId,
+    viewMode,
+    isRootExpanded,
+    isViewOptionsMenuOpen,
+    hasPendingPermissions,
+    changedFiles,
+    visibleTreeRowIds,
+    treeModel,
+    expandedPaths,
+    layout,
+    openDiffByMode,
+    setDirectoryExpanded,
+  });
 
-      const currentIndex = getActiveIndex();
-      const startIndex =
-        currentIndex === -1
-          ? direction === "down"
-            ? -1
-            : changedFiles.length
-          : currentIndex;
-      const newIndex =
-        direction === "up"
-          ? Math.max(0, startIndex - 1)
-          : Math.min(changedFiles.length - 1, startIndex + 1);
-
-      const file = changedFiles[newIndex];
-      if (file) {
-        openDiffByMode(taskId, file.path, file.status);
-      }
-    },
-    [changedFiles, getActiveIndex, openDiffByMode, taskId],
-  );
-
-  useHotkeys(
-    "up",
-    () => handleKeyNavigation("up"),
-    { enabled: !hasPendingPermissions },
-    [handleKeyNavigation, hasPendingPermissions],
-  );
-  useHotkeys(
-    "down",
-    () => handleKeyNavigation("down"),
-    { enabled: !hasPendingPermissions },
-    [handleKeyNavigation, hasPendingPermissions],
-  );
+  const handleExpandAllFolders = useCallback(() => {
+    setRootExpanded(taskId, true);
+    expandAllDirectories();
+  }, [expandAllDirectories, setRootExpanded, taskId]);
 
   const isFileActive = (file: ChangedFile): boolean => {
     if (!layout) return false;
@@ -687,9 +478,7 @@ function LocalChangesPanel({ taskId, task: _task }: ChangesPanelProps) {
     return <PanelMessage>Loading changes...</PanelMessage>;
   }
 
-  const hasChanges = changedFiles.length > 0;
-
-  if (!hasChanges) {
+  if (changedFiles.length === 0) {
     return (
       <Box height="100%" overflowY="auto" py="2">
         <Flex direction="column" height="100%">
@@ -699,30 +488,75 @@ function LocalChangesPanel({ taskId, task: _task }: ChangesPanelProps) {
     );
   }
 
+  const rootLabel =
+    workspace?.worktreeName ??
+    getBaseName(repoPath) ??
+    getBaseName(workspace?.folderPath) ??
+    "Workspace";
+
   return (
-    <Box height="100%" overflowY="auto" py="2">
-      <Flex direction="column">
-        {changedFiles.map((file) => (
-          <ChangedFileItem
-            key={file.path}
-            file={file}
-            taskId={taskId}
-            repoPath={repoPath}
-            isActive={isFileActive(file)}
-            mainRepoPath={workspace?.folderPath}
-          />
-        ))}
-        <Flex align="center" justify="center" gap="1" py="2">
-          <CaretUpIcon size={12} color="var(--gray-10)" />
-          <Text size="1" className="text-gray-10">
-            /
-          </Text>
-          <CaretDownIcon size={12} color="var(--gray-10)" />
-          <Text size="1" className="text-gray-10" ml="1">
-            to switch files
-          </Text>
-        </Flex>
-      </Flex>
-    </Box>
+    <ChangesFilesView
+      rootLabel={rootLabel}
+      files={changedFiles}
+      viewMode={viewMode}
+      isRootExpanded={isRootExpanded}
+      isViewOptionsMenuOpen={isViewOptionsMenuOpen}
+      selectedEntryId={selectedEntryId}
+      treeModel={treeModel}
+      visibleTreeRowIds={visibleTreeRowIds}
+      expandedPaths={expandedPaths}
+      selectedDirectoryPath={selectedDirectoryPath}
+      allDirectoryPaths={allDirectoryPaths}
+      onToggleRoot={() => toggleRoot(taskId)}
+      onViewOptionsMenuOpenChange={setIsViewOptionsMenuOpen}
+      onSetViewMode={(mode) => setViewMode(taskId, mode)}
+      onToggleDirectory={toggleDirectory}
+      onExpandAllFolders={handleExpandAllFolders}
+      onCollapseAllFolders={collapseAllDirectories}
+      renderFileRow={(file, options) => (
+        <ChangesLocalFileRow
+          file={file}
+          taskId={taskId}
+          repoPath={repoPath}
+          isActive={isFileActive(file)}
+          isKeyboardSelected={
+            hasKeyboardSelection
+              ? selectedFileId === getChangedFileId(file)
+              : undefined
+          }
+          mainRepoPath={workspace?.folderPath}
+          paddingLeft={options.paddingLeft}
+          showTreeSpacer={options.showTreeSpacer}
+        />
+      )}
+      footer={
+        isRootExpanded ? (
+          <Flex align="center" justify="center" gap="2" py="2" wrap="wrap">
+            <Flex align="center" gap="1">
+              <CaretUpIcon size={12} color="var(--gray-10)" />
+              <Text size="1" className="text-gray-10">
+                /
+              </Text>
+              <CaretDownIcon size={12} color="var(--gray-10)" />
+              {viewMode === "tree" && (
+                <>
+                  <Text size="1" className="text-gray-10">
+                    /
+                  </Text>
+                  <CaretLeftIcon size={12} color="var(--gray-10)" />
+                  <Text size="1" className="text-gray-10">
+                    /
+                  </Text>
+                  <CaretRightIcon size={12} color="var(--gray-10)" />
+                </>
+              )}
+              <Text size="1" className="text-gray-10" ml="1">
+                to navigate
+              </Text>
+            </Flex>
+          </Flex>
+        ) : undefined
+      }
+    />
   );
 }
