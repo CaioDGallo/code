@@ -7,10 +7,9 @@ import { GitBranchDialog } from "@features/git-interaction/components/GitInterac
 import { useGitQueries } from "@features/git-interaction/hooks/useGitQueries";
 import { useGitInteractionStore } from "@features/git-interaction/state/gitInteractionStore";
 import {
-  sanitizeBranchName,
-  validateBranchName,
-} from "@features/git-interaction/utils/branchNameValidation";
-import { invalidateGitBranchQueries } from "@features/git-interaction/utils/gitCacheKeys";
+  createBranch,
+  getBranchNameInputState,
+} from "@features/git-interaction/utils/branchCreation";
 import type { MessageEditorHandle } from "@features/message-editor/components/MessageEditor";
 import { ModeIndicatorInput } from "@features/message-editor/components/ModeIndicatorInput";
 import { DropZoneOverlay } from "@features/sessions/components/DropZoneOverlay";
@@ -29,7 +28,7 @@ import {
 import { Flex } from "@radix-ui/themes";
 import { useTRPC } from "@renderer/trpc/client";
 import { useNavigationStore } from "@stores/navigationStore";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { usePreviewSession } from "../hooks/usePreviewSession";
@@ -64,6 +63,7 @@ export function TaskInput() {
 
   const [editorIsEmpty, setEditorIsEmpty] = useState(true);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [isCreatingBranch, setIsCreatingBranch] = useState(false);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
   const [selectedEnvironment, setSelectedEnvironmentRaw] = useState<
     string | null
@@ -108,43 +108,34 @@ export function TaskInput() {
     actions: gitActions,
   } = useGitInteractionStore();
 
-  const createBranchMutation = useMutation(
-    trpcReact.git.createBranch.mutationOptions({
-      onSuccess: (_data, { branchName }) => {
-        if (selectedDirectory) invalidateGitBranchQueries(selectedDirectory);
-        setSelectedBranch(branchName);
-        gitActions.closeBranch();
-      },
-      onError: (error) => {
-        const message =
-          error instanceof Error ? error.message : "Failed to create branch.";
-        gitActions.setBranchError(message);
-      },
-    }),
-  );
-
   const handleNewBranchNameChange = useCallback(
     (value: string) => {
-      const sanitized = sanitizeBranchName(value);
+      const { sanitized, error } = getBranchNameInputState(value);
       gitActions.setBranchName(sanitized);
-      gitActions.setBranchError(validateBranchName(sanitized));
+      gitActions.setBranchError(error);
     },
     [gitActions],
   );
 
-  const handleCreateBranch = useCallback(() => {
-    const trimmed = newBranchName.trim();
-    if (!trimmed || !selectedDirectory) return;
-    const validationError = validateBranchName(trimmed);
-    if (validationError) {
-      gitActions.setBranchError(validationError);
-      return;
+  const handleCreateBranch = useCallback(async () => {
+    setIsCreatingBranch(true);
+
+    try {
+      const result = await createBranch({
+        repoPath: selectedDirectory || undefined,
+        rawBranchName: newBranchName,
+      });
+      if (!result.success) {
+        gitActions.setBranchError(result.error);
+        return;
+      }
+
+      setSelectedBranch(result.branchName);
+      gitActions.closeBranch();
+    } finally {
+      setIsCreatingBranch(false);
     }
-    createBranchMutation.mutate({
-      directoryPath: selectedDirectory,
-      branchName: trimmed,
-    });
-  }, [newBranchName, selectedDirectory, gitActions, createBranchMutation]);
+  }, [selectedDirectory, newBranchName, gitActions]);
 
   // Preview session provides adapter-specific config options
   const {
@@ -459,7 +450,7 @@ export function TaskInput() {
         branchName={newBranchName}
         onBranchNameChange={handleNewBranchNameChange}
         onConfirm={handleCreateBranch}
-        isSubmitting={createBranchMutation.isPending}
+        isSubmitting={isCreatingBranch}
         error={branchError}
       />
     </div>
