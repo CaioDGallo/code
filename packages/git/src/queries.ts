@@ -137,7 +137,7 @@ export async function hasChanges(
   return manager.executeRead(
     baseDir,
     async (git) => {
-      const status = await git.status();
+      const status = await git.status(["--untracked-files=no"]);
       return !status.isClean();
     },
     { signal: options?.abortSignal },
@@ -162,7 +162,7 @@ export async function getAheadBehind(
         return null;
       }
 
-      const status = await git.status();
+      const status = await git.status(["--untracked-files=no"]);
       return {
         aheadOfRemote: status.ahead,
         behind: status.behind,
@@ -401,10 +401,23 @@ export async function getChangedFilesDetailed(
     baseDir,
     async (git) => {
       try {
-        const [diffSummary, status] = await Promise.all([
+        // Use --untracked-files=no to avoid traversing large untracked directories
+        // (e.g. .pnpm-store with 100k+ files). Untracked entries are fetched
+        // separately via ls-files --directory which only lists top-level entries.
+        const [diffSummary, status, untrackedOutput] = await Promise.all([
           git.diffSummary(["-M", "HEAD"]),
-          git.status(),
+          git.status(["--untracked-files=no"]),
+          git.raw([
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+          ]),
         ]);
+
+        // Parse NUL-delimited output from ls-files -z to safely handle special chars
+        const untrackedEntries = untrackedOutput.split("\0").filter(Boolean);
 
         const seenPaths = new Set<string>();
         const files: ChangedFileInfo[] = [];
@@ -441,7 +454,9 @@ export async function getChangedFilesDetailed(
           if (hasFrom) seenPaths.add(file.from as string);
         }
 
-        for (const file of status.not_added) {
+        for (const entry of untrackedEntries) {
+          // Normalise: ls-files --directory appends "/" to dirs; strip it for display
+          const file = entry.endsWith("/") ? entry.slice(0, -1) : entry;
           if (!seenPaths.has(file)) {
             if (
               excludePatterns &&
@@ -449,7 +464,11 @@ export async function getChangedFilesDetailed(
             ) {
               continue;
             }
-            const lineCount = await countFileLines(path.join(baseDir, file));
+            // Directories: don't read contents, just report 0 lines
+            const isDir = entry.endsWith("/");
+            const lineCount = isDir
+              ? 0
+              : await countFileLines(path.join(baseDir, file));
             files.push({
               path: file,
               status: "untracked",
@@ -637,7 +656,9 @@ export async function getSyncStatus(
     baseDir,
     async (git) => {
       try {
-        const status = await git.status();
+        // --untracked-files=no prevents git from traversing large untracked
+        // directories (e.g. .pnpm-store). ahead/behind/branch info is unaffected.
+        const status = await git.status(["--untracked-files=no"]);
         const isDetached = status.detached || status.current === "HEAD";
         const currentBranch = isDetached ? null : status.current || null;
 
