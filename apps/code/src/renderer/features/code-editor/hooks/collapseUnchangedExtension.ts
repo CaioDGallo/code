@@ -10,27 +10,41 @@ import {
   Decoration,
   type DecorationSet,
   EditorView,
+  GutterMarker,
+  gutterWidgetClass,
   WidgetType,
 } from "@codemirror/view";
 
 const EXPAND_LINES = 20;
 
 export interface CollapsedRange {
-  /** First collapsed line number (1-based) */
   fromLine: number;
-  /** Last collapsed line number (1-based) */
   toLine: number;
+  limitFromLine: number;
+  limitToLine: number;
 }
 
 export const expandUp = StateEffect.define<{ pos: number; lines: number }>();
 export const expandDown = StateEffect.define<{ pos: number; lines: number }>();
 export const expandAll = StateEffect.define<number>();
 
+const SVG_ARROW_LINE_DOWN = `<svg width="12" height="12" viewBox="0 0 256 256" fill="currentColor"><path d="M50.34,117.66a8,8,0,0,1,11.32-11.32L120,164.69V32a8,8,0,0,1,16,0V164.69l58.34-58.35a8,8,0,0,1,11.32,11.32l-72,72a8,8,0,0,1-11.32,0ZM216,208H40a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Z"/></svg>`;
+const SVG_ARROW_LINE_UP = `<svg width="12" height="12" viewBox="0 0 256 256" fill="currentColor"><path d="M205.66,138.34a8,8,0,0,1-11.32,11.32L136,91.31V224a8,8,0,0,1-16,0V91.31L61.66,149.66a8,8,0,0,1-11.32-11.32l72-72a8,8,0,0,1,11.32,0ZM216,32H40a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Z"/></svg>`;
+const SVG_ARROWS_OUT_LINE_VERTICAL = `<svg width="12" height="12" viewBox="0 0 256 256" fill="currentColor"><path d="M224,128a8,8,0,0,1-8,8H40a8,8,0,0,1,0-16H216A8,8,0,0,1,224,128ZM101.66,53.66,120,35.31V96a8,8,0,0,0,16,0V35.31l18.34,18.35a8,8,0,0,0,11.32-11.32l-32-32a8,8,0,0,0-11.32,0l-32,32a8,8,0,0,0,11.32,11.32Zm52.68,148.68L136,220.69V160a8,8,0,0,0-16,0v60.69l-18.34-18.35a8,8,0,0,0-11.32,11.32l32,32a8,8,0,0,0,11.32,0l32-32a8,8,0,0,0-11.32-11.32Z"/></svg>`;
+
+class CollapsedGutterMarker extends GutterMarker {
+  elementClass = "cm-collapsed-gutter-el";
+}
+
+const collapsedGutterMarker = new CollapsedGutterMarker();
+
 class ExpandWidget extends WidgetType {
   constructor(
     readonly collapsedLines: number,
     readonly showUp: boolean,
     readonly showDown: boolean,
+    readonly expandableUp: number,
+    readonly expandableDown: number,
   ) {
     super();
   }
@@ -39,7 +53,9 @@ class ExpandWidget extends WidgetType {
     return (
       this.collapsedLines === other.collapsedLines &&
       this.showUp === other.showUp &&
-      this.showDown === other.showDown
+      this.showDown === other.showDown &&
+      this.expandableUp === other.expandableUp &&
+      this.expandableDown === other.expandableDown
     );
   }
 
@@ -47,44 +63,25 @@ class ExpandWidget extends WidgetType {
     const outer = document.createElement("div");
     outer.className = "cm-collapsed-context";
 
-    // Left gutter area with stacked arrows (GitHub-style)
-    const gutterArea = document.createElement("div");
-    gutterArea.className = "cm-collapsed-gutter";
-
     if (this.showUp) {
-      const upButton = document.createElement("button");
-      upButton.className = "cm-collapsed-expand-btn";
-      upButton.title = `Expand ${Math.min(EXPAND_LINES, this.collapsedLines)} lines up`;
-      upButton.innerHTML = `<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M3.47 7.78a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0l4.25 4.25a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018L8 3.81 3.97 7.78a.75.75 0 0 1-1.06 0Z"/><path d="M3.47 12.28a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0l4.25 4.25a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018L8 8.31l-4.03 3.97a.75.75 0 0 1-1.06 0Z"/></svg>`;
-      upButton.addEventListener("mousedown", (e) => {
+      const upBtn = document.createElement("button");
+      upBtn.className = "cm-collapsed-expand-btn";
+      const upLines = Math.min(EXPAND_LINES, this.collapsedLines);
+      upBtn.title = `Expand ${upLines} lines`;
+      upBtn.innerHTML = `${SVG_ARROW_LINE_DOWN}<span>${upLines} lines</span>`;
+      upBtn.addEventListener("mousedown", (e) => {
         e.preventDefault();
         const pos = view.posAtDOM(outer);
         view.dispatch({ effects: expandUp.of({ pos, lines: EXPAND_LINES }) });
         syncSibling(view, expandUp, pos, EXPAND_LINES);
       });
-      gutterArea.appendChild(upButton);
+      outer.appendChild(upBtn);
     }
 
-    if (this.showDown) {
-      const downButton = document.createElement("button");
-      downButton.className = "cm-collapsed-expand-btn";
-      downButton.title = `Expand ${Math.min(EXPAND_LINES, this.collapsedLines)} lines down`;
-      downButton.innerHTML = `<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.53 8.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L2.97 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L8 12.19l4.03-3.97a.75.75 0 0 1 1.06 0Z"/><path d="M12.53 3.72a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L2.97 4.78a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L8 7.69l4.03-3.97a.75.75 0 0 1 1.06 0Z"/></svg>`;
-      downButton.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        const pos = view.posAtDOM(outer);
-        view.dispatch({ effects: expandDown.of({ pos, lines: EXPAND_LINES }) });
-        syncSibling(view, expandDown, pos, EXPAND_LINES);
-      });
-      gutterArea.appendChild(downButton);
-    }
-
-    outer.appendChild(gutterArea);
-
-    // Label area
-    const label = document.createElement("span");
-    label.className = "cm-collapsed-label";
-    label.textContent = `${this.collapsedLines} unchanged lines`;
+    const label = document.createElement("button");
+    label.className = "cm-collapsed-expand-btn";
+    label.title = `Expand all ${this.collapsedLines} lines`;
+    label.innerHTML = `${SVG_ARROWS_OUT_LINE_VERTICAL}<span>All ${this.collapsedLines} lines</span>`;
     label.addEventListener("mousedown", (e) => {
       e.preventDefault();
       const pos = view.posAtDOM(outer);
@@ -92,6 +89,21 @@ class ExpandWidget extends WidgetType {
       syncSibling(view, expandAll, pos);
     });
     outer.appendChild(label);
+
+    if (this.showDown) {
+      const downBtn = document.createElement("button");
+      downBtn.className = "cm-collapsed-expand-btn";
+      const downLines = Math.min(EXPAND_LINES, this.collapsedLines);
+      downBtn.title = `Expand ${downLines} lines`;
+      downBtn.innerHTML = `${SVG_ARROW_LINE_UP}<span>${downLines} lines</span>`;
+      downBtn.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const pos = view.posAtDOM(outer);
+        view.dispatch({ effects: expandDown.of({ pos, lines: EXPAND_LINES }) });
+        syncSibling(view, expandDown, pos, EXPAND_LINES);
+      });
+      outer.appendChild(downBtn);
+    }
 
     return outer;
   }
@@ -169,13 +181,21 @@ export function buildDecorations(
     const lines = range.toLine - range.fromLine + 1;
     const from = state.doc.line(range.fromLine).from;
     const to = state.doc.line(range.toLine).to;
-    const isFirst = range.fromLine === 1;
-    const isLast = range.toLine === state.doc.lines;
+    const expandableUp = range.fromLine - range.limitFromLine;
+    const expandableDown = range.limitToLine - range.toLine;
+    const canExpandUp = expandableUp > 0 && lines >= EXPAND_LINES;
+    const canExpandDown = expandableDown > 0 && lines >= EXPAND_LINES;
     builder.add(
       from,
       to,
       Decoration.replace({
-        widget: new ExpandWidget(lines, !isFirst, !isLast),
+        widget: new ExpandWidget(
+          lines,
+          canExpandUp,
+          canExpandDown,
+          expandableUp,
+          expandableDown,
+        ),
         block: true,
       }),
     );
@@ -198,14 +218,21 @@ export function computeInitialRanges(
 
   for (let i = 0; ; i++) {
     const chunk = i < chunks.length ? chunks[i] : null;
-    const collapseFrom = i ? prevLine + margin : 1;
-    const collapseTo = chunk
-      ? state.doc.lineAt(isA ? chunk.fromA : chunk.fromB).number - 1 - margin
+    const limitFrom = i ? prevLine : 1;
+    const limitTo = chunk
+      ? state.doc.lineAt(isA ? chunk.fromA : chunk.fromB).number - 1
       : state.doc.lines;
+    const collapseFrom = i ? prevLine + margin : 1;
+    const collapseTo = chunk ? limitTo - margin : state.doc.lines;
     const lines = collapseTo - collapseFrom + 1;
 
     if (lines >= minSize) {
-      ranges.push({ fromLine: collapseFrom, toLine: collapseTo });
+      ranges.push({
+        fromLine: collapseFrom,
+        toLine: collapseTo,
+        limitFromLine: limitFrom,
+        limitToLine: limitTo,
+      });
     }
 
     if (!chunk) break;
@@ -239,16 +266,16 @@ export function applyExpandEffect(
 
     const { lines } = effect.value as { pos: number; lines: number };
 
-    if (isDown) {
+    if (isUp) {
       const newFrom = range.fromLine + lines;
       if (newFrom > range.toLine) return [];
-      return [{ fromLine: newFrom, toLine: range.toLine }];
+      return [{ ...range, fromLine: newFrom }];
     }
 
-    if (isUp) {
+    if (isDown) {
       const newTo = range.toLine - lines;
       if (newTo < range.fromLine) return [];
-      return [{ fromLine: range.fromLine, toLine: newTo }];
+      return [{ ...range, toLine: newTo }];
     }
 
     return [range];
@@ -274,8 +301,7 @@ export function gradualCollapseUnchanged({
       let newRanges = prev.ranges;
       let changed = false;
 
-      // If document changed, recompute from scratch
-      if (tr.docChanged) {
+      if (tr.docChanged || (prev.ranges.length === 0 && getChunks(tr.state))) {
         newRanges = computeInitialRanges(tr.state, margin, minSize);
         changed = true;
       }
@@ -294,5 +320,10 @@ export function gradualCollapseUnchanged({
     provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
   });
 
-  return [collapsedField];
+  const collapsedGutterFill = gutterWidgetClass.of((_view, widget) => {
+    if (widget instanceof ExpandWidget) return collapsedGutterMarker;
+    return null;
+  });
+
+  return [collapsedField, collapsedGutterFill];
 }
