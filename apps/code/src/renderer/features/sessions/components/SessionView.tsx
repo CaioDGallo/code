@@ -252,7 +252,10 @@ export function SessionView({
       }
 
       if (customInput) {
-        if (isOtherOption(optionId)) {
+        if (
+          isOtherOption(optionId) ||
+          selectedOption?._meta?.customInput === true
+        ) {
           await getSessionService().respondToPermission(
             taskId,
             firstPendingPermission.toolCallId,
